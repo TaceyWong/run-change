@@ -1,6 +1,8 @@
 # Run-Change
 Run a command when a file is changed
 
+*This is a Golang clone of Python's [when-changed](https://github.com/joh/when-changed)*
+
 
 
 
