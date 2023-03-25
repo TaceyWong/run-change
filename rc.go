@@ -1,22 +1,21 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/urfave/cli/v2"
 )
 
 type RunChange struct {
-	Opt        *Options
+	ctx        *cli.Context
 	Exclude    *regexp.Regexp
 	ProcessEnv map[string]string
 	Paths      []string
@@ -25,18 +24,19 @@ type RunChange struct {
 
 // RunChange executes command when file is changed
 func (rc *RunChange) RunCommand(theFile string) {
-	if rc.Opt.RunOnce {
+	if rc.ctx.Bool("run-onece") {
 		// 如果文件存在且文件最后修改时间小于最后运行时间，则停止运行
 		return
 	}
 	printMSG := ""
-	if rc.Opt.VerboseMode > 0 {
+	verbose := rc.ctx.Int("verbose")
+	if verbose > 0 {
 		printMSG += ""
 	}
-	if rc.Opt.VerboseMode > 1 {
+	if verbose > 1 {
 		printMSG += ""
 	}
-	if rc.Opt.VerboseMode > 2 {
+	if verbose > 2 {
 		printMSG += ""
 	}
 	if printMSG != "" {
@@ -88,11 +88,15 @@ func (rc *RunChange) OnDeleted(event fsnotify.Event) {
 
 }
 
-func (rc *RunChange) SetEnvVar() {
-
+func (rc *RunChange) SetEnvVar(name, value string) {
+	rc.ProcessEnv["WHEN_CHANGED_"+strings.ToUpper(name)] = value
 }
 
-func (rc *RunChange) Run() {
+func (rc *RunChange) GetEnvVar(name string) string {
+	return rc.ProcessEnv["WHEN_CHANGED_"+strings.ToUpper(name)]
+}
+
+func (rc *RunChange) Run() error {
 	// Create new watcher.
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -138,16 +142,15 @@ func (rc *RunChange) Run() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	// Block main goroutine forever.
 	<-make(chan struct{})
+	return err
 }
 
-func Watch(opt *Options) {
+func NewRunChange(files []string, command string, ctx *cli.Context) *RunChange {
 	rc := RunChange{
 		ProcessEnv: make(map[string]string),
 	}
-	rc.Opt = opt
 	patterns := []string{
 		//Vim swap files
 		`\..*\.sw[px]*$`,
@@ -170,7 +173,7 @@ func Watch(opt *Options) {
 		pair := strings.SplitN(e, "=", 2)
 		rc.ProcessEnv[pair[0]] = pair[1]
 	}
-
+	return &rc
 }
 
 func SetupExit() {
@@ -183,52 +186,95 @@ func SetupExit() {
 	}()
 }
 
-type Options struct {
-	Recursive   bool
-	VerboseMode int
-	RunOnce     bool
-	RunAtStart  bool
-	QuietMode   bool
-	Command     string
-	Help        bool
-	Files       []string
-}
-
-var Usage = func() *Options {
-	opt := Options{}
-	flag.BoolVar(&opt.Recursive, "r", false, "Watch recursively")
-	flag.IntVar(&opt.VerboseMode, "v", 0, "Verbose output")
-	flag.BoolVar(&opt.RunOnce, "1", false, "Don't re-run command if files changed while command was running")
-	flag.BoolVar(&opt.RunAtStart, "s", false, "Run command immediately at start")
-	flag.BoolVar(&opt.QuietMode, "q", false, "Run command quietly")
-	flag.StringVar(&opt.Command, "c", "", "command to execute")
-	flag.BoolVar(&opt.Help, "h", false, "Show this help info")
-	flag.Parse()
-
-	helpInfo := `Run-Change(%s) - run a command when a file is changed
-
-Usage: %s [-v-r-s-1-c] FILE/DIR COMMAND...
-       %s [-v-r-s-1-c] FILE/DIR [FILE/DIR ...] -c COMMAND
-
-Options:
-
-`
-	name := filepath.Base(os.Args[0])
-	fmt.Fprintf(os.Stderr, helpInfo, name, name, name)
-	flag.PrintDefaults()
-	fmt.Println(`
-Environment variables:
-
-  - WHEN_CHANGED_EVENT: reflects the current event type that occurs.
-		Could be either: file_created, file_modified, file_moved, file_deleted
-  - WHEN_CHANGED_FILE: provides the full path of the file that has generated the event.
-
-Copyright (c) 2023, Tacey Wong.
-License: MIT, see LICENSE for more details.`)
-	return &opt
-}
-
 func main() {
-	SetupExit()
-	Watch(Usage())
+	app := &cli.App{
+		Name:  "run-change",
+		Usage: "run a command when a file is changed",
+		UsageText: `
+run-change [-v-r-s-1-c] FILE/DIR [FILE/DIR ...] [COMMAND]`,
+		Authors: []*cli.Author{{Name: "Tacey Wong", Email: "xinyong.wang@qq.com"}},
+		Description: `Environment variables:
+
+		- WHEN_CHANGED_EVENT: reflects the current event type that occurs.
+			  Could be either: file_created, file_modified, file_moved, file_deleted
+		- WHEN_CHANGED_FILE: provides the full path of the file that has generated the event.`,
+		Copyright:       "© 2023 Tacey Wong License under MIT, see LICENSE for more details",
+		HideHelpCommand: true,
+		Flags: []cli.Flag{
+			&cli.BoolFlag{
+				Name:    "recursive",
+				Aliases: []string{"r"},
+				Value:   false,
+				Usage:   "Watch recursively",
+			},
+			&cli.IntFlag{
+				Name:    "verbose",
+				Aliases: []string{"v"},
+				Value:   0,
+				Usage:   "`num` of verbose output",
+			},
+			&cli.BoolFlag{
+				Name:    "run-once",
+				Aliases: []string{"1"},
+				Value:   false,
+				Usage:   "Don't re-run command \n\tif files changed while command was running",
+			},
+			&cli.BoolFlag{
+				Name:    "run-at-start",
+				Aliases: []string{"s"},
+				Value:   false,
+				Usage:   "Run command immediately at start",
+			},
+			&cli.BoolFlag{
+				Name:    "quiete",
+				Aliases: []string{"q"},
+				Value:   false,
+				Usage:   "Run command quietly",
+			},
+			&cli.StringFlag{
+				Name:    "command",
+				Aliases: []string{"c"},
+				Usage:   "Commands to run",
+			},
+		},
+		Action: func(cCtx *cli.Context) error {
+			if cCtx.NArg() < 1 {
+				return cli.ShowAppHelp(cCtx)
+			}
+			fmt.Println(cCtx.Args(), cCtx.NArg())
+			var command string
+			files := []string{}
+			if c := cCtx.String("command"); c != "" {
+				command = c
+				files = cCtx.Args().Slice()
+			} else if cCtx.NArg() >= 2 {
+				command = strings.Join(cCtx.Args().Slice()[1:], " ")
+				files = append(files, cCtx.Args().First())
+			}
+			println(command, files[0])
+			if command == "" || len(files) == 0 {
+				return cli.ShowAppHelp(cCtx)
+			}
+
+			if len(files) > 1 {
+				if cCtx.Int("verbose") > 0 {
+					l := fmt.Sprintf("'%s'", strings.Join(files, "', '"))
+					fmt.Printf("When %s changes,run `%s` \n", l, command)
+				}
+
+			} else {
+				if cCtx.Int("verbose") > 0 {
+					fmt.Printf("When '%s' changes,run `%s` \n", files[0], command)
+				}
+			}
+			SetupExit()
+			rc := NewRunChange(files, command, cCtx)
+			rc.Run()
+			return nil
+		},
+	}
+
+	if err := app.Run(os.Args); err != nil {
+		log.Fatal(err)
+	}
 }
